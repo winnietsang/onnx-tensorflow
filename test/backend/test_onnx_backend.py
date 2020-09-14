@@ -72,7 +72,18 @@ backend_test.exclude(
 # skip all the cumsum testcases because all the axis in the testcases
 # are created as a 1-D 1 element tensor, but the spec clearly state
 # that axis should be a 0-D tensor(scalar)
-backend_test.exclude(r'test_cumsum_[a-z,_]*')
+if legacy_opset_pre_ver(13):
+  backend_test.exclude(r'test_cumsum_[a-z,_]*')
+
+# Currently ONNX's backend test runner does not support sequence as input/output
+backend_test.exclude(r'test_if_seq[1-z,_]*')
+
+# TF session run does not support sequence/RaggedTensor as model inputs
+backend_test.exclude(r'test_loop13_seq[1-z,_]*')
+
+# TF minimum/maximum do not support uint64 when auto-cast is False (default)
+backend_test.exclude(r'test_min_uint64_[a-z,_]*')
+backend_test.exclude(r'test_max_uint64_[a-z,_]*')
 
 if legacy_opset_pre_ver(7):
   backend_test.exclude(r'[a-z,_]*Upsample[a-z,_]*')

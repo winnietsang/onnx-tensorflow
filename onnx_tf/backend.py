@@ -65,7 +65,7 @@ class TensorflowBackend(Backend):
     super(TensorflowBackend, cls).prepare(model, device, **kwargs)
     common.logger.setLevel(logging_level)
     common.logger.handlers[0].setLevel(logging_level)
-    common.sys_config.auto_cast=auto_cast
+    common.sys_config.auto_cast = auto_cast
 
     return cls.onnx_model_to_tensorflow_rep(model, strict)
 
@@ -141,6 +141,39 @@ class TensorflowBackend(Backend):
       # defined tensors so we can have access to the placeholders
       # to feed in input tensors when we run the graph.
       input_dict = dict(input_dict_items)
+
+      def get_initializer_in_subgraph(graph, graph_tensor_dict):
+        if graph.initializer:
+          graph_tensor_dict.update(
+              cls._onnx_initializer_to_input_dict_items(graph.initializer))
+        for node in graph.node:
+          if node.op_type in ['Loop', 'Scan']:
+            onnx_node = OnnxNode(node)
+            body = onnx_node.attrs["body"]
+            graph_tensor_dict = get_initializer_in_subgraph(
+                body, graph_tensor_dict)
+          elif node.op_type == 'If':
+            onnx_node = OnnxNode(node)
+            then_branch = onnx_node.attrs['then_branch']
+            graph_tensor_dict = get_initializer_in_subgraph(
+                then_branch, graph_tensor_dict)
+            else_branch = onnx_node.attrs['else_branch']
+            graph_tensor_dict = get_initializer_in_subgraph(
+                else_branch, graph_tensor_dict)
+        return graph_tensor_dict
+
+      # get all initializer in all subgraph from loop or if or scan into tensor_dict
+      for node in graph_def.node:
+        if node.op_type in ['Loop', 'Scan']:
+          onnx_node = OnnxNode(node)
+          body = onnx_node.attrs["body"]
+          tensor_dict = get_initializer_in_subgraph(body, tensor_dict)
+        elif node.op_type == 'If':
+          onnx_node = OnnxNode(node)
+          then_branch = onnx_node.attrs['then_branch']
+          tensor_dict = get_initializer_in_subgraph(then_branch, tensor_dict)
+          else_branch = onnx_node.attrs['else_branch']
+          tensor_dict = get_initializer_in_subgraph(else_branch, tensor_dict)
 
       for node in graph_def.node:
         onnx_node = OnnxNode(node)
@@ -252,11 +285,13 @@ class TensorflowBackend(Backend):
     """
     handlers = handlers or cls._get_handlers(opset)
     if handlers:
-      handler = handlers[node.domain].get(node.op_type, None) if node.domain in handlers else None
+      handler = handlers[node.domain].get(
+          node.op_type, None) if node.domain in handlers else None
       if handler:
         return handler.handle(node, tensor_dict=tensor_dict, strict=strict)
 
-    raise BackendIsNotSupposedToImplementIt("{} is not implemented.".format(node.op_type))
+    raise BackendIsNotSupposedToImplementIt("{} is not implemented.".format(
+        node.op_type))
 
   @classmethod
   def _get_handlers(cls, opset):
@@ -276,21 +311,14 @@ class TensorflowBackend(Backend):
   @classmethod
   def onnx_graph_to_tensorflow_ops(cls,
                                    subgraph,
-                                   input_values,
                                    tensor_dict,
                                    opset=None,
                                    strict=True):
     """
     Converts ONNX graph to Tensorflow operations
     Args:
-      subgraph:         the ONNX graph to be converted
-      input_values:     dictionary with values/tensors to initialize
-                        the subgraph inputs. if the subgraph.input
-                        are send in as parameters then it is required,
-                        otherwise this can be empty dictionary
-      tensor_dict:      the dictionary that contain values for all the
-                        node.inputs in the subgraph that are not defined
-                        in the subgraph or input_values.
+      subgraph:         the ONNX graph to be converted.
+      tensor_dict:      tensor dict of the whole graph.
       opset:            opset version of the operator set.
       strict:           whether to enforce semantic equivalence between the
                         original model and the converted tensorflow model,
@@ -298,32 +326,15 @@ class TensorflowBackend(Backend):
     Returns:
       array of Tensorflow Tensors
     """
-    # get the subgraph.input from input_values
-    subgraph_tensor_dict = input_values.copy()
-    # get the rest of the subgraph input from tensor_dict
-    for i in subgraph.input:
-      if i.name not in subgraph_tensor_dict.keys():
-        subgraph_tensor_dict[i.name] = tensor_dict[i.name]
-    # get the required initializer constant node(s) for the subgraph
-    # Need to get the initializer constant nodes from tensor_dict here
-    # because input from initializer will not be send in as inputs
-    # to the subgraph and those nodes are not in the subgraph
-    nodes_outputs = []
     for node in subgraph.node:
-      for o_name in node.output:
-        nodes_outputs.append(o_name)
-    for node in subgraph.node:
-      for i_name in node.input:
-        if i_name not in nodes_outputs and i_name not in subgraph_tensor_dict.keys():
-          subgraph_tensor_dict[i_name] = tensor_dict[i_name]
       onnx_node = OnnxNode(node)
       output_ops = cls._onnx_node_to_tensorflow_op(onnx_node,
-                                                   subgraph_tensor_dict,
+                                                   tensor_dict,
                                                    opset=opset,
                                                    strict=strict)
       curr_node_output_map = dict(zip(onnx_node.outputs, output_ops))
-      subgraph_tensor_dict.update(curr_node_output_map)
-    return subgraph_tensor_dict
+      tensor_dict.update(curr_node_output_map)
+    return tensor_dict
 
   @classmethod
   def onnx_graph_to_tensorflow_rep(cls, graph_def, strict=True):
